@@ -1,5 +1,6 @@
 {
-    "name": "scholar/ai-query",
+    "$schema": "https://getcomposer.org/schema.json",
+    "name": "ankitkaran99/ai-query",
     "version": "0.0.1",
     "description": "A small, safe, natural-language query layer for Laravel — powered by Prism. Returns structured query specs, never executes generated code.",
     "type": "library",

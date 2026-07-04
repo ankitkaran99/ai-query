@@ -266,6 +266,175 @@ cache:clear` (clears everything, not just AI Query) or switching
   that comes with that (a wrong-but-valid target isn't something
   `QuerySpecValidator` can catch).
 
+## Bug fixes / optimizations changelog
+
+- **Aggregate handling was a no-op.** The LLM's spec always included an
+  `aggregate` field (`count`/`list`/`sum`/`avg`), but nothing in the code
+  ever read it — every question, including "how many," fetched full rows
+  via `->get()`. `count`/`sum`/`avg` now run as real SQL aggregates and
+  never fetch rows at all. `sum`/`avg` gained a required, allow-listed
+  `aggregate_field` (previously present in the enum with no way to say
+  *which* column to aggregate).
+- **Eager-loaded relation columns could silently break hydration.** The
+  `select()` applied to a `with()` eager load hardcoded `'id'` as the only
+  extra column kept. For a `HasMany`/`HasOne`, Eloquent actually needs the
+  *foreign key on the related table* to re-attach rows to their parent —
+  without it, the relation comes back empty even when matching rows exist,
+  with no error. Now resolved per relation type (`HasOneOrMany` ->
+  foreign key, `BelongsTo` -> owner key).
+- **`between`/`in` values weren't shape-checked.** A malformed value (e.g.
+  one value for `between`) reached `whereBetween()`/`whereIn()` directly,
+  producing a wrong-but-not-failed query instead of a clear validation
+  error. Now checked in `QuerySpecValidator` before any query is built.
+- **Reflection work repeated on every request.** `autoColumns()`,
+  `exposeRelation()`, and class discovery all resolve columns via
+  `$model->getFillable()` / relation instantiation inside
+  `AiQueryServiceProvider::boot()`, which runs on every request whether or
+  not `AiQuery::ask()` is ever called. That resolution is now cached
+  (`Cache::remember`, 24h TTL) the same way `promptSchema()` already was.
+- **`AiQueryResult::count()` was ambiguous for aggregates.** Split into
+  `count()` (rows actually fetched — always 0 for aggregate results) and
+  `aggregateValue`/`isAggregate()` (the real count/sum/avg number), so
+  callers can't misread one for the other.
+
+### Second pass
+
+- **A single bad `app/AiQuery` class could 500 the entire app.**
+  Discovery runs in `ServiceProvider::boot()`, which fires on every
+  request. An uncaught exception while resolving one queryable (typo'd
+  relation name, a model not migrated yet on a fresh install) previously
+  took down every page, not just AI Query. Each class is now resolved in
+  isolation with `report()` on failure instead of letting it bubble.
+- **`newInstance()` bypassed the container.** Discovered `Queryable`
+  classes are now resolved via `$this->app->make()`, so constructor
+  dependencies (a repository, the current tenant, anything typehinted)
+  work the normal Laravel way instead of erroring.
+- **Column cache could outlive a security-relevant deploy.** The 24h
+  column-resolution cache added in the first pass had no invalidation —
+  removing a column from `$fillable` specifically to hide it from the AI
+  could still leave it exposed for up to a day post-deploy. Cache keys now
+  include the model file's mtime, so editing/redeploying the model busts
+  the cache immediately (works in local dev too, since saving the file
+  changes its mtime).
+- **Relative-date prompts could outlive their correctness.** A cached spec
+  for "today"/"this month" bakes in a concrete resolved date. With a long
+  TTL (some deployments raise it for cost), that date could still be
+  served after the day rolls over. The spec cache key now includes the
+  current date, so this can't happen regardless of configured TTL.
+
+### Third pass
+
+- **Two filters on the same relation could silently drop each other, or
+  change meaning.** If the spec had two separate `relation_filters` entries
+  for the same relation (e.g. status=unpaid *and* amount>100 on
+  `feePayments`), they became two independent `whereHas()` EXISTS
+  subqueries — satisfiable by two *different* rows instead of requiring
+  one row to match both — and two `with()` calls for the same relation
+  silently overwrote each other, so the first constraint's column
+  restriction vanished. Same-relation filters are now merged into one
+  EXISTS subquery / one `with()` call before building.
+- **`avg` of zero matching rows was reported as 0, not "no data".**
+  Eloquent's `sum()` coalesces an empty result to `0` internally, but
+  `avg()` does not — `AVG()` over zero rows is `NULL` in SQL and Eloquent
+  passes that through untouched. Casting it to `(float)` silently turned
+  "nothing to average" into a misleading "average is 0". `AiQueryResult`
+  now tracks `aggregateType` separately from `aggregateValue`, so a null
+  average is distinguishable from "this wasn't an aggregate query" and
+  from "the average genuinely is 0".
+
+### Fourth pass
+
+- **Validator assumed well-shaped input.** Every check assumed `filters`
+  was genuinely an array, each filter genuinely an object with a string
+  `field`/`operator`, etc. That's a safe assumption for Claude's
+  structured output, but this library explicitly supports weaker/local
+  providers too (Ollama, DeepSeek, OpenRouter) that are less consistent
+  about strictly following a JSON schema. A malformed response previously
+  risked a raw PHP `TypeError` or an `Array to string conversion` warning
+  deep inside validation instead of a clean, catchable
+  `InvalidQuerySpecException`. Every level is now shape-checked explicitly
+  before its contents are read.
+- **Validation could be bypassed by a stale cache entry.** It only ran on
+  a cache miss. The cache key is scoped to the registry's *data*
+  fingerprint (columns/relations), but not to the validation *logic*
+  itself — a library update that tightens a rule (e.g. removing an
+  operator) wouldn't invalidate previously-cached specs, so they'd keep
+  bypassing the new rule until natural TTL expiry. Validation is pure and
+  cheap, so it now always runs, cache hit or not.
+
+### Fifth pass
+
+- **`composer.json` had an invalid version constraint.** `"prism-php/prism":
+  "^0.x"` mixes caret (`^`, which needs a concrete version) with a `.x`
+  wildcard (which needs a plain prefix) — the two aren't combinable.
+  `composer require`/`composer install` would fail to parse this and
+  refuse to install the package at all, which would have made every fix
+  in every earlier pass moot. Changed to `"^0.1|^1.0"`.
+
+### Sixth pass
+
+- **A cache-busting fix from an earlier pass had a gap of its own.**
+  `resolveRelationColumns()` cached its result keyed only by the *parent*
+  model's file version (e.g. `Student.php`) — but the value cached is the
+  *related* model's columns (e.g. `FeePayment`'s `$fillable`). Editing
+  `FeePayment` to remove a column — the exact scenario that fix was
+  supposed to protect — left `Student.php` untouched, so the cache never
+  busted and kept serving the stale, wider list. Removed the redundant
+  outer cache entirely; the inner `resolveModelColumns()` cache (correctly
+  keyed by the actual related class) already covers this, and relation
+  instantiation itself is cheap enough not to need its own cache layer.
+- **Column-scoped eager loading was only verified for three relation
+  types.** `HasOneOrMany`, `BelongsTo`, and `BelongsToMany` have documented
+  key-column requirements this was checked against; `HasManyThrough` and
+  polymorphic `MorphTo` (both plausible in a School ERP — e.g. students
+  through enrollments to classes) don't, and guessing at their internals
+  from memory without a way to execute and verify risked silently
+  reintroducing the exact hydration bug from the first pass, just for a
+  rarer relation type. Any relation type not explicitly verified now falls
+  back to an unrestricted `with()` — correct always, optimized only where
+  actually confirmed safe.
+
+### Seventh pass (reviewing the cache-cleanup feature itself)
+
+- **The taggability probe re-threw an exception on every single cache
+  operation, not just at boot.** `SpecCache::get()`/`put()` run on every
+  AI query; each call was re-attempting `Cache::tags()` and catching the
+  failure fresh on non-taggable stores (file/database) — real overhead
+  for something that's a fixed property of your config, not something
+  that changes per request. Memoized per store name now; a
+  `resetMemoizedTaggability()` escape hatch exists for long-lived workers
+  (Octane/RoadRunner) that reconfigure cache connections mid-process.
+- **Naming collision with Laravel's own cache internals.** The helper was
+  originally named `TaggedCache` — but `Illuminate\Cache\Repository::tags()`
+  itself returns an instance of `Illuminate\Cache\TaggedCache`. Different
+  namespaces, so not a compile error, but a genuinely confusing collision
+  for anyone grepping the codebase later. Renamed to `AiQueryCache`.
+
+### Eighth pass — the first bug caught by actually running the suite
+
+Every fix up to this point came from reading code, not executing it (this
+environment has no PHP interpreter). This one is different: it was caught
+by `composer test` against a real Laravel app, and it's exactly the kind
+of thing static reading kept flagging as a risk without being able to
+confirm.
+
+- **`TypeError` on every relation eager load.** Eloquent's `with(['relation'
+  => function ($q) { ... }])` closure form passes the **Relation** instance
+  itself (e.g. `HasMany`) to the closure — not a `Builder`, which is what
+  `whereHas()`'s closure receives. The eager-load closure here was typed
+  `Builder $q`, so real execution hit `TypeError: Argument #1 ($q) must be
+  of type Illuminate\Database\Eloquent\Builder, Illuminate\Database\Eloquent\Relations\HasMany given`
+  on every single restricted-column relation load — which is to say, on
+  exactly the code path the first pass's regression tests were written to
+  protect. `Relation` forwards `where()`/`select()` to its underlying query
+  via `__call`, so the logic itself was fine; retyped the parameter to
+  `Relation`, which is both accurate and still type-safe (as opposed to
+  removing the hint entirely).
+
+This is the strongest evidence in this whole changelog for why "read the
+code again" has a ceiling that running it doesn't.
+
+
 ### Token usage
 
 Every `AiQueryResult` carries the token cost of producing it, summed across
@@ -294,16 +463,7 @@ composer test
 
 The suite uses [Pest](https://pestphp.com) + [Orchestra Testbench](https://packages.tools/testbench),
 with an in-memory SQLite database and fixture `Student`/`FeePayment`/
-`AttendanceRecord` models under `tests/Fixtures`. As of the eighth
-changelog pass below, this passes fully against a real Laravel app: 59
-tests, 74 assertions, 0 failures.
-
-If you see `Constant PDO::MYSQL_ATTR_SSL_CA is deprecated` noise, that's
-`orchestra/testbench-core`'s own default skeleton config evaluating a
-MySQL connection default even though `TestCase::getEnvironmentSetUp()`
-overrides `database.default` to sqlite — not this package's code.
-`phpunit.xml.dist` sets `error_reporting` to suppress `E_DEPRECATED` for
-test output clarity; it doesn't change what actually runs.
+`AttendanceRecord` models under `tests/Fixtures`.
 
 What's covered:
 
