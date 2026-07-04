@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<phpunit xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:noNamespaceSchemaLocation="vendor/phpunit/phpunit/phpunit.xsd"
+         bootstrap="vendor/autoload.php"
+         colors="true"
+         cacheDirectory=".phpunit.cache"
+>
+    <!--
+        Suppresses PHP_DEPRECATED noise from orchestra/testbench-core's
+        default skeleton config, which defines a MySQL connection (and
+        evaluates PDO::MYSQL_ATTR_SSL_CA as a default value in doing so)
+        even though every test here overrides database.default to sqlite
+        in TestCase::getEnvironmentSetUp(). The deprecation is in
+        testbench's own config file, not in this package's code — this
+        only silences E_DEPRECATED for test output clarity, it doesn't
+        change what runs.
+    -->
+    <php>
+        <ini name="error_reporting" value="E_ALL &amp; ~E_DEPRECATED"/>
+    </php>
+    <testsuites>
+        <testsuite name="Unit">
+            <directory suffix="Test.php">./tests/Unit</directory>
+        </testsuite>
+        <testsuite name="Feature">
+            <directory suffix="Test.php">./tests/Feature</directory>
+        </testsuite>
+    </testsuites>
+    <source>
+        <include>
+            <directory suffix=".php">./src</directory>
+        </include>
+    </source>
+</phpunit>

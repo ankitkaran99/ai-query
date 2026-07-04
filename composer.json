@@ -1,0 +1,47 @@
+{
+    "name": "scholar/ai-query",
+    "version": "0.0.1",
+    "description": "A small, safe, natural-language query layer for Laravel — powered by Prism. Returns structured query specs, never executes generated code.",
+    "type": "library",
+    "license": "MIT",
+    "require": {
+        "php": "^8.2",
+        "illuminate/console": "^11.0|^12.0",
+        "illuminate/support": "^11.0|^12.0",
+        "illuminate/database": "^11.0|^12.0",
+        "prism-php/prism": "^0.1|^1.0"
+    },
+    "require-dev": {
+        "orchestra/testbench": "^9.0|^10.0",
+        "pestphp/pest": "^2.0|^3.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "Scholar\\AiQuery\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Scholar\\AiQuery\\Tests\\": "tests/"
+        }
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "Scholar\\AiQuery\\AiQueryServiceProvider"
+            ],
+            "aliases": {
+                "AiQuery": "Scholar\\AiQuery\\Facades\\AiQuery"
+            }
+        }
+    },
+    "scripts": {
+        "test": "vendor/bin/pest"
+    },
+    "config": {
+        "allow-plugins": {
+            "pestphp/pest-plugin": true
+        }
+    },
+    "minimum-stability": "stable"
+}
